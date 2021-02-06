@@ -27,7 +27,7 @@ def MNISTArchitecture():
         ('dec3a', elementwise(nn.sigmoid)),
         ('out', Dense(784, W_init=sparse_init(), b_init=initializers.zeros)),
     )
-    param_info = [('in', 'enc1z'),
+    param_info = (('in', 'enc1z'),
                   ('enc1a', 'enc2z'),
                   ('enc2a', 'enc3z'),
                   ('enc3a', 'code'),
@@ -35,7 +35,7 @@ def MNISTArchitecture():
                   ('dec1a', 'dec2z'),
                   ('dec2a', 'dec3z'),
                   ('dec3a', 'out')
-                 ]
+                 )
     in_shape=(-1, 784)
     flatten, unflatten = get_flatten_fns(net_init, in_shape)
     return Architecture(net_init, net_apply, in_shape, flatten, unflatten, param_info)

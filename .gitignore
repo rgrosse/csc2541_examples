@@ -16,6 +16,8 @@
 *.fls
 *.synctex.gz
 
+*.ipynb
+
 
 .DS_Store
 *.pygtex

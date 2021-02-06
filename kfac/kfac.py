@@ -1,4 +1,4 @@
-from jax import grad, numpy as np, random, vjp, jvp
+from jax import grad, jit, numpy as np, random, vjp, jvp
 from jax.scipy.linalg import eigh
 import numpy as onp
 
@@ -30,41 +30,56 @@ def get_chunks(batch_size, chunk_size):
         start = end
 
 
-def make_instrumented_vjp(arch, params, inputs):
+def make_instrumented_vjp(apply_fn, params, inputs):
     """Returns a function which takes in the output layer gradients and returns a dict
     containing the gradients for all the intermediate layers."""
     dummy_input = np.zeros((2,) + inputs.shape[1:])
-    _, dummy_activations = arch.net_apply(params, dummy_input, ret_all=True)
+    _, dummy_activations = apply_fn(params, dummy_input, ret_all=True)
     
     batch_size = inputs.shape[0]
     add_to = {name: np.zeros((batch_size,) + dummy_activations[name].shape[1:])
               for name in dummy_activations}
-    apply_wrap = lambda a: arch.net_apply(params, inputs, a, ret_all=True)
+    apply_wrap = lambda a: apply_fn(params, inputs, a, ret_all=True)
     primals_out, vjp_fn, activations = vjp(apply_wrap, add_to, has_aux=True)
     return primals_out, vjp_fn, activations
+
+
+def estimate_covariances_chunk(apply_fn, param_info, output_model, net_params, X_chunk, rng):
+    """Compute the empirical covariances on a chunk of data."""
+    logits, vjp_fn, activations = make_instrumented_vjp(apply_fn, net_params, X_chunk)
+    key, rng = random.split(rng)
+    output_grads = output_model.sample_grads_fn(logits, key)
+    act_grads = vjp_fn(output_grads)[0]
+
+    A = {}
+    G = {}
+    for in_name, out_name in param_info:
+        a = activations[in_name]
+        a_hom = np.hstack([a, np.ones((a.shape[0], 1))])
+        A[in_name] = a_hom.T @ a_hom
+
+        ds = act_grads[out_name]
+        G[out_name] = ds.T @ ds
+
+    return A, G
+
+estimate_covariances_chunk = jit(estimate_covariances_chunk, static_argnums=(0,1,2))
 
 
 def estimate_covariances(arch, output_model, w, X, rng, chunk_size):
     """Compute the empirical covariances on a batch of data."""
     batch_size = X.shape[0]
+    net_params = arch.unflatten(w)
     A_sum = {in_name: 0. for in_name, out_name in arch.param_info}
     G_sum = {out_name: 0. for in_name, out_name in arch.param_info}
     for chunk_idxs in get_chunks(batch_size, chunk_size):
         X_chunk = X[chunk_idxs,:]
         key, rng = random.split(rng)
         
-        logits, vjp_fn, activations = make_instrumented_vjp(arch, arch.unflatten(w), X_chunk)
-        key, rng = random.split(rng)
-        output_grads = output_model.sample_grads_fn(logits, key)
-        act_grads = vjp_fn(output_grads)[0]
-        
-        for in_name, out_name in arch.param_info:
-            a = activations[in_name]
-            a_hom = np.hstack([a, np.ones((a.shape[0], 1))])
-            A_sum[in_name] = A_sum[in_name] + a_hom.T @ a_hom
-            
-            ds = act_grads[out_name]
-            G_sum[out_name] = G_sum[out_name] + ds.T @ ds
+        A_curr, G_curr = estimate_covariances_chunk(
+            arch.net_apply, arch.param_info, output_model, net_params, X_chunk, key)
+        A_sum = {name: A_sum[name] + A_curr[name] for name in A_sum}
+        G_sum = {name: G_sum[name] + G_curr[name] for name in G_sum}
             
     A_mean = {name: A_sum[name] / batch_size for name in A_sum}
     G_mean = {name: G_sum[name] / batch_size for name in G_sum}
@@ -81,8 +96,6 @@ def update_covariances(A, G, arch, output_model, w, X, rng, cov_timescale, chunk
     for k in G.keys():
         G[k] = ema_param * G[k] + (1-ema_param) * curr_G[k]
     return A, G
-
-
 
 def compute_pi(A, G):
     return np.sqrt((np.trace(A) * G.shape[0]) / (A.shape[0] * np.trace(G)))
@@ -108,17 +121,21 @@ def compute_eigs(arch, A, G):
         pi[out_name] = compute_pi(A[in_name], G[out_name])
     return A_eig, G_eig, pi
 
-def nll_cost(arch, output_model, w, X, T):
-    logits = arch.net_apply(arch.unflatten(w), X)
-    return output_model.nll_fn(logits, T)
+def nll_cost(apply_fn, nll_fn, unflatten_fn, w, X, T):
+    logits = apply_fn(unflatten_fn(w), X)
+    return nll_fn(logits, T)
+
+nll_cost = jit(nll_cost, static_argnums=(0, 1, 2))
+grad_nll_cost = jit(grad(nll_cost, 3), static_argnums=(0, 1, 2))
     
 def compute_cost(arch, output_model, w, X, T, weight_cost, chunk_size):
     batch_size = X.shape[0]
     total = 0
-    
+
     for chunk_idxs in get_chunks(batch_size, chunk_size):
         X_chunk, T_chunk = X[chunk_idxs, :], T[chunk_idxs, :]
-        total += nll_cost(arch, output_model, w, X_chunk, T_chunk)
+        total += nll_cost(arch.net_apply, output_model.nll_fn, arch.unflatten,
+                          w, X_chunk, T_chunk)
         
     return total / batch_size + weight_cost * L2_penalty(arch, w)
 
@@ -129,8 +146,8 @@ def compute_gradient(arch, output_model, w, X, T, weight_cost, chunk_size):
     for chunk_idxs in get_chunks(batch_size, chunk_size):
         X_chunk, T_chunk = X[chunk_idxs, :], T[chunk_idxs, :]
         
-        grad_cost = grad(nll_cost, 2)
-        grad_w += grad_cost(arch, output_model, w, X_chunk, T_chunk)
+        grad_w += grad_nll_cost(arch.net_apply, output_model.nll_fn, arch.unflatten,
+                                w, X_chunk, T_chunk)
         
     grad_w /= batch_size
     grad_w += weight_cost * grad(L2_penalty, 1)(arch, w)
@@ -149,10 +166,9 @@ def compute_natgrad_from_inverses(arch, grad_w, A_inv, G_inv):
         natgrad[out_name] = (natgrad_W, natgrad_b)
     return arch.flatten(natgrad)
 
-def compute_natgrad_from_eigs(arch, grad_w, A_eig, G_eig, pi, gamma):
-    param_grad = arch.unflatten(grad_w)
+def compute_natgrad_from_eigs_helper(param_info, param_grad, A_eig, G_eig, pi, gamma):
     natgrad = {}
-    for in_name, out_name in arch.param_info:
+    for in_name, out_name in param_info:
         grad_W, grad_b = param_grad[out_name]
         grad_Wb = np.vstack([grad_W, grad_b.reshape((1, -1))])
         
@@ -172,7 +188,36 @@ def compute_natgrad_from_eigs(arch, grad_w, A_eig, G_eig, pi, gamma):
         
         natgrad_W, natgrad_b = natgrad_Wb[:-1, :], natgrad_Wb[-1, :]
         natgrad[out_name] = (natgrad_W, natgrad_b)
+    return natgrad
+
+compute_natgrad_from_eigs_helper = jit(compute_natgrad_from_eigs_helper, static_argnums=(0,))
+
+def compute_natgrad_from_eigs(arch, grad_w, A_eig, G_eig, pi, gamma):
+    param_grad = arch.unflatten(grad_w)
+    natgrad = compute_natgrad_from_eigs_helper(
+        arch.param_info, param_grad, A_eig, G_eig, pi, gamma)
     return arch.flatten(natgrad)
+
+def compute_A_chunk(apply_fn, nll_fn, unflatten_fn, w, X, T, dirs, grad_w):
+    ndir = len(dirs)
+    predict_wrap = lambda w: apply_fn(unflatten_fn(w), X)
+    
+    RY, RgY = [], []
+    for v in dirs:
+        Y, RY_ = jvp(predict_wrap, (w,), (v,))
+        nll_wrap = lambda Y: nll_fn(Y, T)
+        RgY_ = kfac_util.hvp(nll_wrap, Y, RY_)
+        RY.append(RY_)
+        RgY.append(RgY_)
+
+    A = np.array([[onp.sum(RY[i] * RgY[j])
+                   for j in range(ndir)]
+                  for i in range(ndir)])
+
+    return A
+
+compute_A_chunk = jit(compute_A_chunk, static_argnums=(0, 1, 2))
+
 
 def compute_step_coeffs(arch, output_model, w, X, T, dirs, grad_w,
                         weight_cost, lmbda, chunk_size):
@@ -196,19 +241,9 @@ def compute_step_coeffs(arch, output_model, w, X, T, dirs, grad_w,
     batch_size = X.shape[0]
     for chunk_idxs in get_chunks(batch_size, chunk_size):
         X_chunk, T_chunk = X[chunk_idxs, :], T[chunk_idxs, :]
-        predict_wrap = lambda w: arch.net_apply(arch.unflatten(w), X_chunk)
-    
-        RY, RgY = [], []
-        for v in dirs:
-            Y, RY_ = jvp(predict_wrap, (w,), (v,))
-            nll_wrap = lambda Y: output_model.nll_fn(Y, T_chunk)
-            RgY_ = kfac_util.hvp(nll_wrap, Y, RY_)
-            RY.append(RY_)
-            RgY.append(RgY_)
-            
-        for i in range(ndir):
-            for j in range(ndir):
-                A_func[i, j] += onp.sum(RY[i] * RgY[j])
+
+        A_func += compute_A_chunk(arch.net_apply, output_model.nll_fn, arch.unflatten,
+                                  w, X_chunk, T_chunk, dirs, grad_w)
     
     A_func /= batch_size
     
