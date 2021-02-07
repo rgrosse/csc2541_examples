@@ -25,7 +25,7 @@ def run():
     try:
         obj = scipy.io.loadmat('digs3pts_1.mat')
     except:
-        print("To run this script, first download www.cs.toronto.edu/~jmartens/digs3pts_1.mat to this directory.")
+        print("To run this script, first download https://www.cs.toronto.edu/~jmartens/digs3pts_1.mat to this directory.")
 
     X_train = obj['bdata']
     X_test = obj['bdatatest']
