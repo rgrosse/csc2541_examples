@@ -2,6 +2,7 @@ from jax import grad, jit, numpy as np, random, vjp, jvp
 from jax.scipy.linalg import eigh
 import numpy as onp
 
+
 import kfac_util
 
 
@@ -128,13 +129,13 @@ def nll_cost(apply_fn, nll_fn, unflatten_fn, w, X, T):
 nll_cost = jit(nll_cost, static_argnums=(0, 1, 2))
 grad_nll_cost = jit(grad(nll_cost, 3), static_argnums=(0, 1, 2))
     
-def compute_cost(arch, output_model, w, X, T, weight_cost, chunk_size):
+def compute_cost(arch, nll_fn, w, X, T, weight_cost, chunk_size):
     batch_size = X.shape[0]
     total = 0
 
     for chunk_idxs in get_chunks(batch_size, chunk_size):
         X_chunk, T_chunk = X[chunk_idxs, :], T[chunk_idxs, :]
-        total += nll_cost(arch.net_apply, output_model.nll_fn, arch.unflatten,
+        total += nll_cost(arch.net_apply, nll_fn, arch.unflatten,
                           w, X_chunk, T_chunk)
         
     return total / batch_size + weight_cost * L2_penalty(arch, w)
@@ -309,7 +310,7 @@ def update_gamma(state, arch, output_model, X, T, config):
         new_w = state['w'] + update
         
         results.append(compute_cost(
-            arch, output_model, new_w, X, T, config['weight_cost'],
+            arch, output_model.nll_fn, new_w, X, T, config['weight_cost'],
             config['chunk_size']))
         
     best_idx = onp.argmin(results)
@@ -317,9 +318,9 @@ def update_gamma(state, arch, output_model, X, T, config):
 
 def update_lambda(arch, output_model, lmbda, old_w, new_w, X, T, quad_dec, config):
     old_cost = compute_cost(
-        arch, output_model, old_w, X, T, config['weight_cost'], config['chunk_size'])
+        arch, output_model.nll_fn, old_w, X, T, config['weight_cost'], config['chunk_size'])
     new_cost = compute_cost(
-        arch, output_model, new_w, X, T, config['weight_cost'], config['chunk_size'])
+        arch, output_model.nll_fn, new_w, X, T, config['weight_cost'], config['chunk_size'])
     rho = (old_cost - new_cost) / quad_dec
     
     if np.isnan(rho) or rho < 0.25:

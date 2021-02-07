@@ -23,3 +23,5 @@
 *.pygtex
 *.pygstyle
 
+kfac/digs3pts_1.mat
+

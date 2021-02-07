@@ -85,11 +85,12 @@ def sparse_init(num_conn=15, stdev=1.):
     def init(rng, shape):
         k1, k2 = random.split(rng)
         in_dim, out_dim = shape
+        num_conn_ = np.minimum(num_conn, in_dim)
         W = np.zeros(shape)
         row_idxs = np.outer(np.arange(in_dim), np.ones(out_dim)).astype(np.uint32)
-        row_idxs = random.shuffle(k1, row_idxs)[:num_conn, :].ravel()
-        col_idxs = np.outer(np.ones(num_conn), np.arange(out_dim)).astype(np.uint32).ravel()
-        vals = random.normal(k2, shape=(num_conn*out_dim,)) * stdev
+        row_idxs = random.shuffle(k1, row_idxs)[:num_conn_, :].ravel()
+        col_idxs = np.outer(np.ones(num_conn_), np.arange(out_dim)).astype(np.uint32).ravel()
+        vals = random.normal(k2, shape=(num_conn_*out_dim,)) * stdev
         return index_update(W, (row_idxs, col_idxs), vals)
     return init
 
