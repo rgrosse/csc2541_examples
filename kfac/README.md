@@ -9,7 +9,7 @@ To run the MNIST autoencoder experiment:
 python mnist.py
 ```
 
-To run the Curves autoexperiment, first download the Curves dataset to the code directory, and then run:
+To run the Curves autoexperiment, first download the [Curves dataset](https://www.cs.toronto.edu/~jmartens/digs3pts_1.mat) to the code directory, and then run:
 ```
 python curves.py
 ```
